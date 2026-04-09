@@ -1,49 +1,20 @@
-# mssql-mcp
+# `@adriancy/mcp-mssql`
 
-MCP server (stdio) that connects to Microsoft SQL Server using the `mssql` driver. Tool arguments are defined and validated with [Valibot](https://valibot.dev); JSON Schema for clients is generated with `@valibot/to-json-schema`.
+MCP server (stdio) for Microsoft SQL Server. Exposes tools so Cursor (or any MCP client) can list tables, describe columns, and run read-biased T-SQL.
 
-**Implementation note:** This project uses the low-level `@modelcontextprotocol/sdk` `Server` class rather than `McpServer`, because the current SDK’s `McpServer.registerTool` path is built around Zod for schema export and validation. Tools are registered with `ListTools` / `tools/call` handlers and Valibot parsing inside the handlers.
+## Use it in Cursor
 
-## Tools
+1. Open **Cursor Settings → MCP** (or edit your MCP JSON).
+2. Add a server block. Set `env` to your database (see [`.env.example`](.env.example)).
 
-- **`mssql_query`** — Run a T-SQL batch; returns `recordsets` and `rowsAffected`. Honors `MSSQL_MAX_ROWS` via `SET ROWCOUNT` when set.
-- **`mssql_list_tables`** — Base tables from `INFORMATION_SCHEMA.TABLES`, optional schema filter.
-- **`mssql_describe_table`** — Column metadata from `INFORMATION_SCHEMA.COLUMNS`.
-
-## Environment variables
-
-See [`.env.example`](.env.example). Required: `MSSQL_SERVER`, `MSSQL_USER`, `MSSQL_PASSWORD`, `MSSQL_DATABASE`.
-
-- **`MSSQL_ALLOW_WRITES`** — Default off. When off, a heuristic blocks common write/DDL/exec keywords (not a substitute for DB permissions).
-- **`MSSQL_MAX_ROWS`** — When set, wraps batches in `SET ROWCOUNT` for `mssql_query`.
-- **`MSSQL_ENCRYPT`** / **`MSSQL_TRUST_SERVER_CERTIFICATE`** — Passed through to the driver (`encrypt` defaults to true).
-
-## Build and run
-
-```bash
-pnpm install
-pnpm run build
-pnpm start
-```
-
-Development (no separate build):
-
-```bash
-pnpm dev
-```
-
-Do not write logs to **stdout** when running under MCP; the protocol uses stdout. Errors on startup go to stderr via `console.error`.
-
-## Cursor MCP configuration
-
-Use the absolute path to your checkout. Example **user** MCP config fragment:
+**From npm** (after the package is published):
 
 ```json
 {
   "mcpServers": {
     "mssql": {
-      "command": "node",
-      "args": ["/home/adrian/code/mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@adriancy/mcp-mssql"],
       "env": {
         "MSSQL_SERVER": "localhost",
         "MSSQL_USER": "your_user",
@@ -56,23 +27,65 @@ Use the absolute path to your checkout. Example **user** MCP config fragment:
 }
 ```
 
-Use **`node` as `command`** (as above). Do **not** set `command` to `pnpm` or `npx`: if pnpm fails or prints to stdout, Cursor shows errors like `Unexpected token … "ERR_PNPM_"… is not valid JSON` because stdout must be JSON-RPC only.
-
-### Dev mode without a build (still use `node`)
-
-Set **`cwd`** to this repo so `node` can resolve `tsx` from `node_modules`:
+**From a local clone** (run `pnpm install && pnpm build` first):
 
 ```json
 {
   "mcpServers": {
     "mssql": {
       "command": "node",
-      "args": ["--import", "tsx", "/home/adrian/code/mcp/src/index.ts"],
-      "cwd": "/home/adrian/code/mcp",
-      "env": { }
+      "args": ["/absolute/path/to/mssql-mcp/dist/index.js"],
+      "env": {
+        "MSSQL_SERVER": "localhost",
+        "MSSQL_USER": "your_user",
+        "MSSQL_PASSWORD": "your_password",
+        "MSSQL_DATABASE": "your_database",
+        "MSSQL_TRUST_SERVER_CERTIFICATE": "true"
+      }
     }
   }
 }
 ```
 
-Fill `env` the same as in the example above. Run `pnpm install` locally first so `tsx` exists.
+Use **`node`** for local files. Avoid **`pnpm`** as the MCP `command` — extra output on stdout can break the protocol.
+
+Confirm the install name matches npm: `npm view @adriancy/mcp-mssql version`.
+
+## Environment
+
+All variables are read from the MCP process environment (e.g. Cursor `env`). Booleans treat `1`, `true`, `yes`, `on` (case-insensitive) as true; anything else uses the default.
+
+| Variable | Required | Default | Meaning |
+|----------|----------|---------|---------|
+| `MSSQL_SERVER` | yes | — | Hostname or IP of SQL Server |
+| `MSSQL_USER` | yes | — | SQL login user |
+| `MSSQL_PASSWORD` | yes* | — | SQL login password (*may be empty for some setups) |
+| `MSSQL_DATABASE` | yes | — | Initial database |
+| `MSSQL_PORT` | no | `1433` | TCP port |
+| `MSSQL_ENCRYPT` | no | `true` | TLS `encrypt` (driver option) |
+| `MSSQL_TRUST_SERVER_CERTIFICATE` | no | `false` | Trust self-signed / skip cert validation (dev only) |
+| `MSSQL_ALLOW_WRITES` | no | `false` | If false/unset, blocks common write/DDL/exec patterns in `mssql_query` (heuristic only) |
+| `MSSQL_MAX_ROWS` | no | *(no cap)* | Positive integer: wraps `mssql_query` batches with `SET ROWCOUNT`. `0` or invalid → treated as unset |
+| `MSSQL_QUERY_TIMEOUT_MS` | no | *(driver default)* | Request timeout in ms for the driver. `0` or invalid → treated as unset |
+
+See also [`.env.example`](.env.example).
+
+## Tools
+
+| Tool | Purpose |
+|------|--------|
+| `mssql_query` | Run T-SQL; returns rows and `rowsAffected` |
+| `mssql_list_tables` | Tables in `INFORMATION_SCHEMA` |
+| `mssql_describe_table` | Column metadata |
+
+When `MSSQL_ALLOW_WRITES` is unset/false, obvious write/DDL patterns are blocked (heuristic only; use DB permissions for real safety).
+
+## Develop
+
+```bash
+pnpm install
+pnpm build && pnpm start
+pnpm dev
+```
+
+Use a read-only or least-privilege SQL login for day-to-day use.
