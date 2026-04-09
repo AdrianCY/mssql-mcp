@@ -2,7 +2,15 @@
  * Best-effort read-only gate. Not a substitute for database permissions.
  */
 
-const FORBIDDEN = /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|EXEC|EXECUTE|GRANT|REVOKE|DENY|BULK)\b/i;
+const FORBIDDEN =
+  /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|EXEC|EXECUTE|GRANT|REVOKE|DENY|BULK)\b/i;
+
+export class ReadOnlySqlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReadOnlySqlError';
+  }
+}
 
 export function stripSqlComments(text: string): string {
   let s = text.replace(/\/\*[\s\S]*?\*\//g, ' ');
@@ -56,14 +64,8 @@ export function assertReadOnlySql(sql: string, allowWrites: boolean): void {
   if (allowWrites) return;
   const probe = maskSqlStringLiterals(stripSqlComments(sql));
   if (FORBIDDEN.test(probe)) {
-    throw new Error(
-      'Read-only mode: this batch contains a blocked keyword (INSERT, UPDATE, DELETE, MERGE, DDL, EXEC, etc.). Set MSSQL_ALLOW_WRITES=true to allow writes (still use a least-privilege login).'
+    throw new ReadOnlySqlError(
+      'Read-only mode: this batch contains a blocked keyword (INSERT, UPDATE, DELETE, MERGE, DDL, EXEC, etc.). Set MSSQL_ALLOW_WRITES=true to allow writes (still use a least-privilege login).',
     );
   }
-}
-
-export function wrapWithRowCount(sql: string, maxRows: number | undefined): string {
-  if (maxRows === undefined || maxRows <= 0) return sql;
-  const n = Math.floor(maxRows);
-  return `SET ROWCOUNT ${n}; ${sql}; SET ROWCOUNT 0;`;
 }

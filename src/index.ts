@@ -1,18 +1,20 @@
-import sql from 'mssql';
-import * as v from 'valibot';
+#!/usr/bin/env node
+
 import { Server } from '@modelcontextprotocol/sdk/server';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
-  ListToolsRequestSchema,
   type CallToolResult,
+  ListToolsRequestSchema,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
+import sql from 'mssql';
+import * as v from 'valibot';
 
 type ToolInputSchema = Tool['inputSchema'];
 
-import { loadConfig, mssqlDriverConfig, type AppConfig } from './config.js';
-import { assertReadOnlySql, wrapWithRowCount } from './readonly-sql.js';
+import { type AppConfig, loadConfig, mssqlDriverConfig } from './config.js';
+import { assertReadOnlySql, ReadOnlySqlError } from './readonly-sql.js';
 import {
   mssqlDescribeTableSchema,
   mssqlListTablesSchema,
@@ -36,28 +38,54 @@ function jsonResult(data: unknown): CallToolResult {
   };
 }
 
+function logToolFailure(toolName: string, err: unknown): void {
+  console.error(`[${toolName}]`, err);
+}
+
+function toolExecutionError(toolName: string, err: unknown): CallToolResult {
+  if (err instanceof ReadOnlySqlError) {
+    return toolError(err.message);
+  }
+
+  logToolFailure(toolName, err);
+
+  switch (toolName) {
+    case 'mssql_query':
+      return toolError(
+        'Query failed. Check SQL syntax, permissions, timeout settings, and database connectivity.',
+      );
+    case 'mssql_list_tables':
+      return toolError(
+        'Failed to list tables. Check permissions and database connectivity.',
+      );
+    case 'mssql_describe_table':
+      return toolError(
+        'Failed to describe the table. Check the schema/table name, permissions, and connectivity.',
+      );
+    default:
+      return toolError(
+        'The request failed. Check the server logs for details.',
+      );
+  }
+}
+
 async function runQuery(
   pool: sql.ConnectionPool,
   cfg: AppConfig,
-  batch: string
+  batch: string,
 ): Promise<CallToolResult> {
   assertReadOnlySql(batch, cfg.allowWrites);
-  const wrapped = wrapWithRowCount(batch, cfg.maxRows);
-  const result = await pool.request().query(wrapped);
+  const result = await pool.request().query(batch);
   const recordsets = result.recordsets as Record<string, unknown>[][];
   return jsonResult({
     rowsAffected: result.rowsAffected,
     recordsets,
-    rowCountNote:
-      cfg.maxRows !== undefined
-        ? `ROWCOUNT capped at ${cfg.maxRows} per batch (SET ROWCOUNT).`
-        : undefined,
   });
 }
 
 async function runListTables(
   pool: sql.ConnectionPool,
-  schemaFilter: string | undefined
+  schemaFilter: string | undefined,
 ): Promise<CallToolResult> {
   const req = pool.request();
   req.input('schema', sql.NVarChar(128), schemaFilter ?? null);
@@ -74,7 +102,7 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME`;
 async function runDescribeTable(
   pool: sql.ConnectionPool,
   schema: string,
-  table: string
+  table: string,
 ): Promise<CallToolResult> {
   const req = pool.request();
   req.input('s', sql.NVarChar(128), schema);
@@ -105,12 +133,16 @@ function buildTools(): Tool[] {
     {
       name: 'mssql_list_tables',
       description: `${SHARED_TOOL_PREAMBLE} Lists BASE TABLE rows from INFORMATION_SCHEMA.TABLES.`,
-      inputSchema: valibotToJsonSchema(mssqlListTablesSchema) as ToolInputSchema,
+      inputSchema: valibotToJsonSchema(
+        mssqlListTablesSchema,
+      ) as ToolInputSchema,
     },
     {
       name: 'mssql_describe_table',
       description: `${SHARED_TOOL_PREAMBLE} Returns column metadata from INFORMATION_SCHEMA.COLUMNS.`,
-      inputSchema: valibotToJsonSchema(mssqlDescribeTableSchema) as ToolInputSchema,
+      inputSchema: valibotToJsonSchema(
+        mssqlDescribeTableSchema,
+      ) as ToolInputSchema,
     },
   ];
 }
@@ -126,41 +158,43 @@ async function main(): Promise<void> {
 
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
-    const name = request.params.name;
-    const rawArgs = request.params.arguments ?? {};
+  server.setRequestHandler(
+    CallToolRequestSchema,
+    async (request): Promise<CallToolResult> => {
+      const name = request.params.name;
+      const rawArgs = request.params.arguments ?? {};
 
-    try {
-      switch (name) {
-        case 'mssql_query': {
-          const args = v.parse(mssqlQuerySchema, rawArgs);
-          return await runQuery(pool, cfg, args.sql);
+      try {
+        switch (name) {
+          case 'mssql_query': {
+            const args = v.parse(mssqlQuerySchema, rawArgs);
+            return await runQuery(pool, cfg, args.sql);
+          }
+          case 'mssql_list_tables': {
+            const args = v.parse(mssqlListTablesSchema, rawArgs);
+            return await runListTables(pool, args.schema);
+          }
+          case 'mssql_describe_table': {
+            const args = v.parse(mssqlDescribeTableSchema, rawArgs);
+            return await runDescribeTable(pool, args.schema, args.table);
+          }
+          default:
+            return toolError(`Unknown tool: ${name}`);
         }
-        case 'mssql_list_tables': {
-          const args = v.parse(mssqlListTablesSchema, rawArgs);
-          return await runListTables(pool, args.schema);
+      } catch (err) {
+        if (v.isValiError(err)) {
+          return toolError(`Invalid arguments: ${err.message}`);
         }
-        case 'mssql_describe_table': {
-          const args = v.parse(mssqlDescribeTableSchema, rawArgs);
-          return await runDescribeTable(pool, args.schema, args.table);
-        }
-        default:
-          return toolError(`Unknown tool: ${name}`);
+        return toolExecutionError(name, err);
       }
-    } catch (err) {
-      if (v.isValiError(err)) {
-        return toolError(`Invalid arguments: ${err.message}`);
-      }
-      const msg = err instanceof Error ? err.message : String(err);
-      return toolError(msg);
-    }
-  });
+    },
+  );
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error('Fatal error in main():', err);
   process.exit(1);
 });
